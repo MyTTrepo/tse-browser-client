@@ -82,7 +82,7 @@ class Instrument {
 	constructor(_row='') {
 		const row = _row.split(',');
 		if (row.length !== 18) throw new Error('Invalid Instrument data!');
-		this.InsCode      = row[0];  // int64 (long)
+		this.InsCode      = row[0];         // int64 (long)
 		this.InstrumentID = row[1];
 		this.LatinSymbol  = row[2];
 		this.LatinName    = row[3];
@@ -90,16 +90,16 @@ class Instrument {
 		this.Symbol       = cleanFa(row[5]);
 		this.Name         = row[6];
 		this.CIsin        = row[7];
-		this.DEven        = row[8];  // int32 (int)
-		this.Flow         = row[9];  // 0,1,2,3,4,5,6,7 بازار byte
-		this.LSoc30       = row[10]; // نام 30 رقمي فارسي شرکت
-		this.CGdSVal      = row[11]; // A,I,O نوع نماد
-		this.CGrValCot    = row[12]; // 00,11,1A,...25 کد گروه نماد
-		this.YMarNSC      = row[13]; // NO,OL,BK,BY,ID,UI کد بازار
-		this.CComVal      = row[14]; // 1,3,4,5,6,7,8,9 کد تابلو
-		this.CSecVal      = row[15]; // []62 کد گروه صنعت
-		this.CSoSecVal    = row[16]; // []177 کد زير گروه صنعت
-		this.YVal         = row[17]; // string نوع نماد
+		this.DEven        = row[8];         // int32 (int)
+		this.Flow         = row[9];         // 0,1,2,3,4,5,6,7 بازار byte
+		this.LSoc30       = row[10];        // نام 30 رقمي فارسي شرکت
+		this.CGdSVal      = row[11];        // A,I,O نوع نماد
+		this.CGrValCot    = row[12];        // 00,11,1A,...25 کد گروه نماد
+		this.YMarNSC      = row[13];        // NO,OL,BK,BY,ID,UI کد بازار
+		this.CComVal      = row[14];        // 1,3,4,5,6,7,8,9 کد تابلو
+		this.CSecVal      = row[15].trim(); // []62 کد گروه صنعت
+		this.CSoSecVal    = row[16].trim(); // []177 کد زير گروه صنعت
+		this.YVal         = row[17];        // string نوع نماد
 	}
 }
 class Share {
@@ -171,6 +171,14 @@ function dayDiff(s1, s2) {
 	const msPerDay = (1000 * 60 * 60 * 24);
 	const diffDays = Math.ceil(diffTime / msPerDay);
 	return diffDays;
+}
+function splitArr(arr, size){
+	return arr
+		.map( (v, i) => i % size === 0 ? arr.slice(i, i+size) : undefined )
+		.filter(i => i);
+}
+function sleep(ms) {
+	return new Promise(resolve => setTimeout(resolve, ms));
 }
 //@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 // price helpers
@@ -257,7 +265,11 @@ function getCell(columnName, instrument, closingPrice) {
 	return str;
 }
 //@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-let UPDATE_INTERVAL = 1;
+let UPDATE_INTERVAL           = 1;
+let PRICES_UPDATE_CHUNK       = 10;
+let PRICES_UPDATE_CHUNK_DELAY = 500;
+let PRICES_UPDATE_RETRY_COUNT = 3;
+let PRICES_UPDATE_RETRY_DELAY = 5000;
 const defaultSettings = {
 	columns: [
 		[4, 'date'],
@@ -274,6 +286,17 @@ const defaultSettings = {
 };
 const { warn } = console;
 
+async function getLastPossibleDeven() {
+	let lastPossibleDeven = localStorage.getItem('tse.lastPossibleDeven');
+	const today = new Date();
+	if ( !lastPossibleDeven || (dayDiff(dateToStr(today), lastPossibleDeven) > UPDATE_INTERVAL && ![4,5].includes(today.getDay())) ) {
+		const res = await rq.LastPossibleDeven();
+		if ( !/^\d{8};\d{8}$/.test(res) ) throw new Error('Invalid server response: LastPossibleDeven');
+		lastPossibleDeven = res.split(';')[0] || res.split(';')[1];
+		localStorage.setItem('tse.lastPossibleDeven', lastPossibleDeven);
+	}
+	return +lastPossibleDeven;
+}
 async function updateInstruments() {
 	const lastUpdate = localStorage.getItem('tse.lastInstrumentUpdate');
 	let lastDeven;
@@ -289,9 +312,12 @@ async function updateInstruments() {
 		currentShares      = parseShares();
 		const insDevens = Object.keys(currentInstruments).map( k => parseInt(currentInstruments[k].match(/\b\d{8}\b/)[0]) );
 		const shareIds = Object.keys(currentShares).map( k => parseInt(currentShares[k].split(',',1)[0]) );
-		lastDeven = Math.max.apply(Math, insDevens);
-		lastId    = Math.max.apply(Math, shareIds);
+		lastDeven = Math.max(...insDevens);
+		lastId    = Math.max(...shareIds);
 	}
+	
+	const lastPossibleDeven = await getLastPossibleDeven();
+	if (dayDiff(''+lastDeven, ''+lastPossibleDeven) <= UPDATE_INTERVAL) return;
 	
 	let error;
 	const res = await rq.InstrumentAndShare(lastDeven, lastId).catch(err => error = err);
@@ -325,80 +351,133 @@ async function updateInstruments() {
 		localStorage.setItem('tse.lastInstrumentUpdate', dateToStr(new Date()));
 	}
 }
-async function getLastPossibleDeven() {
-	let lastPossibleDeven = localStorage.getItem('tse.lastPossibleDeven');
-	const today = new Date();
-	if ( !lastPossibleDeven || (dayDiff(dateToStr(today), lastPossibleDeven) > UPDATE_INTERVAL && ![4,5].includes(today.getDay())) ) {
-		const res = await rq.LastPossibleDeven();
-		if ( !/^\d{8};\d{8}$/.test(res) ) throw new Error('Invalid server response: LastPossibleDeven');
-		lastPossibleDeven = res.split(';')[0] || res.split(';')[1];
-		localStorage.setItem('tse.lastPossibleDeven', lastPossibleDeven);
+async function updatePricesRequester(chunk=[]) {
+	let res;
+	const mkRes = (result, error, reqError) => ({ result, error, reqError });
+	
+	const insCodes = chunk.map(i => i.uriSegs.join(',')).join(';');
+	
+	let error;
+	const resp = await rq.ClosingPrices(insCodes).catch(r => error = r);
+	if (error)                          { res = mkRes(chunk, 'Failed request: ClosingPrices', error);   return res; }
+	if ( !/^[\d\.,;@\-]*$/.test(resp) ) { res = mkRes(chunk, 'Invalid server response: ClosingPrices'); return res; }
+	if (resp === '')                    { res = mkRes(chunk, 'Unknown Error.');                         return res; }
+	
+	const o = {};
+	resp.split('@').forEach((v,i)=> o[chunk[i].insCode] = v);
+	res = mkRes(o)
+	
+	return res;
+}
+async function updatePricesRetrier(updateNeeded={}, count=0, result={}) {
+	const keys = Object.keys(updateNeeded);
+	const chunks = splitArr(keys, PRICES_UPDATE_CHUNK).map( i => i.map(k=> updateNeeded[k]) );
+	
+	const proms = [];
+	for (const chunk of chunks) {
+		proms.push( updatePricesRequester(chunk) );
+		await sleep(PRICES_UPDATE_CHUNK_DELAY);
 	}
-	return +lastPossibleDeven;
+	const settled = await Promise.allSettled(proms);
+	const res = settled.map(i => i.value);
+	
+	const fails = res.filter(i => i.error).reduce((a,{result:c})=> c.forEach(i=> a[i.insCode] = i) || a, {});
+	const succs = res.filter(i => !i.error).reduce((a,{result:c}) => Object.keys(c).forEach(k=> a[k] = c[k]) || a, {});
+	
+	result.succs = {...result.succs, ...succs};
+	result.fails = {...fails};
+	
+	count++;
+	if (count > PRICES_UPDATE_RETRY_COUNT) return result;
+	
+	if (Object.keys(fails).length) {
+		result = await new Promise(async (resolve, reject) => {
+			await sleep(PRICES_UPDATE_RETRY_DELAY);
+			const r = await updatePricesRetrier(fails, count, result);
+			resolve(r);
+		});
+	}
+	
+	return result;
 }
 async function updatePrices(instruments=[], startDeven) {
 	if (!instruments.length) return;
 	const lastPossibleDeven = await getLastPossibleDeven();
 	
-	const updateNeeded = [];
-	let insCodes = [];
+	const updateNeeded = {}; // redundant insCode needed due to splitArr & updatePricesRequester
 	for (const instrument of instruments) {
 		const insCode = instrument.InsCode;
 		const market = instrument.YMarNSC === 'NO' ? 0 : 1;
 		const insData = await localforage.getItem('tse.'+insCode);
 		if (!insData) { // doesn't have data
-			insCodes.push( [insCode, startDeven, market] );
-			updateNeeded.push( {insCode} );
+			updateNeeded[insCode] = {
+				uriSegs: [insCode, startDeven, market],
+				insCode
+			};
 		} else { // has data
 			const rows = insData.split(';');
 			const lastRow = new ClosingPrice( rows[rows.length-1] );
 			const lastRowDEven = +lastRow.DEven;
-			if (lastPossibleDeven - lastRowDEven > UPDATE_INTERVAL) { // but outdated
-				insCodes.push( [insCode, lastRowDEven, market] );
-				updateNeeded.push( {insCode, oldContent: insData} );
+			if (dayDiff(''+lastRowDEven, ''+lastPossibleDeven) > UPDATE_INTERVAL) { // but outdated
+				updateNeeded[insCode] = {
+					uriSegs: [insCode, lastRowDEven, market],
+					insCode,
+					oldContent: insData
+				};
 			}
 		}
 	}
-	insCodes = insCodes.map(i => i.join(',')).join(';');
 	
-	if (insCodes === '') return;
+	const { succs, fails } = await updatePricesRetrier(updateNeeded);
 	
-	let error;
-	const res = await rq.ClosingPrices(insCodes).catch(err => error = err);
-	if (error)                       { warn('Failed request: ClosingPrices', `(${error})`);   return; }
-	if ( !/^[\d\.,;@]*$/.test(res) ) { warn('Invalid server response: ClosingPrices');        return; }
-	if (res === '')                  { warn('Unknown Error.');                                return; }
-	
-	const newData = res.split('@');
-	const writes = updateNeeded.map((v, i) => {
-		const { insCode, oldContent } = v;
-		const newContent = newData[i];
+	const suckeys = Object.keys(succs);
+	for (const k of suckeys) {
+		const { oldContent } = updateNeeded[k];
+		const newContent = succs[k];
 		const content = oldContent ? oldContent+';'+newContent : newContent;
-		return ['tse.'+insCode, content];
-	});
-	for (const write of writes) await localforage.setItem(write[0], write[1]);
+		await localforage.setItem('tse.'+k, content);
+	}
+	
+	return {succs, fails};
+}
+async function getInstruments(struct=true, arr=true, structKey='InsCode') {
+	await updateInstruments();
+	return parseInstruments(struct, arr, structKey);
 }
 async function getPrices(symbols=[], settings={}) {
 	if (!symbols.length) return;
+	
+	await updateInstruments();
 	const instruments = parseInstruments(true, undefined, 'Symbol');
 	const selection = symbols.map(i => instruments[i]);
 	const notFounds = symbols.filter((v,i) => !selection[i]);
 	if (notFounds.length) { console.error('Incorrect symbol names:', notFounds); return; }
 	
-	settings = Object.assign(defaultSettings, settings);
+	settings = {...defaultSettings, ...settings};
 	const { adjustPrices, startDate, daysWithoutTrade } = settings;
 	
-	await updatePrices(selection, startDate);
+	const { succs, fails } = await updatePrices(selection, startDate);
+	const [ slen, flen ] = [succs, fails].map(i => Object.keys(i).length);
+	
+	if (flen) {
+		warn(`Incomplete Price Update:  Failed: ${flen} - Updated: ${slen} (after ${PRICES_UPDATE_RETRY_COUNT} retries)`);
+		const failKeys = Object.keys(fails);
+		selection.forEach((v,i,a) => failKeys.includes(v.InsCode) ? a[i] = undefined : 0);
+	}
 	
 	const prices = {};
-	for (const v of selection) {
-		const insCode = v.InsCode;
-		prices[insCode] = (await localforage.getItem('tse.'+insCode)).split(';').map(i => new ClosingPrice(i));
+	for (const i of selection) {
+		if (!i) continue;
+		const insCode = i.InsCode;
+		const strPrices = await localforage.getItem('tse.'+insCode);
+		if (!strPrices) throw new Error('Unkown Error');
+		prices[insCode] = strPrices.split(';').map(i => new ClosingPrice(i));
 	}
 	const shares = localStorage.getItem('tse.shares').split(';').map(i => new Share(i));
 	const columns = settings.columns.map( i => new Column(!Array.isArray(i) ? [i] : i) );
 	
 	const res = selection.map(instrument => {
+		if (!instrument) return;
 		const insCode = instrument.InsCode;
 		const cond = adjustPrices;
 		const closingPrices = cond === 1 || cond === 2
@@ -421,11 +500,8 @@ async function getPrices(symbols=[], settings={}) {
 }
 
 return {
+	getInstruments,
 	getPrices,
-	updateInstruments,
-	getInstruments(struct=true, arr=true, structKey='InsCode') {
-		return parseInstruments(struct, arr, structKey);
-	},
 	
 	get API_URL() { return API_URL; },
 	set API_URL(v) {
@@ -437,6 +513,18 @@ return {
 	
 	get UPDATE_INTERVAL() { return UPDATE_INTERVAL; },
 	set UPDATE_INTERVAL(v) { if (Number.isInteger(v)) UPDATE_INTERVAL = v; },
+	
+	get PRICES_UPDATE_CHUNK() { return PRICES_UPDATE_CHUNK; },
+	set PRICES_UPDATE_CHUNK(v) { if (Number.isInteger(v) && v > 0 && v < 60) PRICES_UPDATE_CHUNK = v; },
+	
+	get PRICES_UPDATE_CHUNK_DELAY() { return PRICES_UPDATE_CHUNK_DELAY; },
+	set PRICES_UPDATE_CHUNK_DELAY(v) { if (Number.isInteger(v)) PRICES_UPDATE_CHUNK_DELAY = v; },
+	
+	get PRICES_UPDATE_RETRY_COUNT() { return PRICES_UPDATE_RETRY_COUNT; },
+	set PRICES_UPDATE_RETRY_COUNT(v) { if (Number.isInteger(v)) PRICES_UPDATE_RETRY_COUNT = v; },
+	
+	get PRICES_UPDATE_RETRY_DELAY() { return PRICES_UPDATE_RETRY_DELAY; },
+	set PRICES_UPDATE_RETRY_DELAY(v) { if (Number.isInteger(v)) PRICES_UPDATE_RETRY_DELAY = v; },
 	
 	get columnList() {
 		return [...Array(15)].map((v,i) => ({name: cols[i], fname: colsFa[i]}));
